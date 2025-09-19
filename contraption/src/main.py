@@ -10,6 +10,9 @@ import plotly.graph_objects as go
 import plotly.express as px
 from pathlib import Path
 
+# Import service level prediction module
+from src.service_level_prediction import show_service_level_prediction
+
 # Configure page
 st.set_page_config(
     page_title="Contraption - WFM Analytics",
@@ -23,22 +26,38 @@ def main():
     st.title("� Contraption")
     st.subheader("Workforce Management Analytics Platform")
 
-    # Sidebar navigation
+    # Sidebar navigation with status indicators
     with st.sidebar:
-        st.header("Navigation")
-        page = st.selectbox(
-            "Choose a section:",
+        st.header("📍 Navigation")
+
+        # Add status indicators for what's loaded
+        if 'merged_data' in st.session_state and st.session_state.merged_data is not None:
+            st.success("✅ Data Loaded")
+        if 'wfm_relationship_models' in st.session_state and st.session_state.wfm_relationship_models:
+            st.success("✅ Models Trained")
+        if 'forecast_data' in st.session_state and st.session_state.forecast_data is not None:
+            st.success("✅ Forecast Ready")
+
+        st.markdown("---")
+
+        # Use radio buttons for better navigation
+        page = st.radio(
+            "Select Section:",
             [
-                "Home",
-                "Data Upload & Processing",
-                "Historical Analysis",
-                "Model Training",
-                "Forecasting",
-                "Service Level Prediction",
-                "Settings"
+                "🏠 Home",
+                "📁 Data Upload & Processing",
+                "📊 Historical Analysis",
+                "🔧 Model Training",
+                "📈 Forecasting",
+                "🎯 Service Level Prediction",
+                "⚙️ Settings"
             ],
-            index=1  # Default to Data Upload & Processing
+            index=1,  # Default to Data Upload & Processing
+            label_visibility="collapsed"
         )
+
+        # Clean up the page name for processing
+        page = page.split(" ", 1)[1] if " " in page else page
 
     # Main content area
     if page == "Home":
@@ -109,7 +128,44 @@ def show_data_upload():
     if 'wfm_preprocessor' not in st.session_state:
         st.session_state.wfm_preprocessor = WFMPreprocessor()
 
-    # File upload section
+    # Check if data is already loaded
+    if 'merged_data' in st.session_state and st.session_state.merged_data is not None:
+        col1, col2 = st.columns([3, 1])
+        with col1:
+            st.success(f"✅ Data already loaded: {st.session_state.merged_data.shape[0]:,} rows, {st.session_state.merged_data.shape[1]} columns")
+        with col2:
+            if st.button("🔄 Upload New Data"):
+                # Clear existing data
+                if 'merged_data' in st.session_state:
+                    del st.session_state.merged_data
+                if 'processed_data' in st.session_state:
+                    del st.session_state.processed_data
+                if 'uploaded_files_info' in st.session_state:
+                    del st.session_state.uploaded_files_info
+                st.rerun()
+
+        # Show loaded file information
+        if 'uploaded_files_info' in st.session_state:
+            with st.expander("📂 Loaded Files", expanded=False):
+                for info in st.session_state.uploaded_files_info:
+                    st.write(f"• **{info['name']}**: {info['rows']:,} rows")
+
+        # Display preview of loaded data
+        st.subheader("📊 Data Preview")
+        st.dataframe(st.session_state.merged_data.head(100), use_container_width=True)
+
+        # Show data summary
+        col1, col2, col3 = st.columns(3)
+        with col1:
+            st.metric("Date Range",
+                     f"{st.session_state.merged_data.index.min().strftime('%Y-%m-%d')} to {st.session_state.merged_data.index.max().strftime('%Y-%m-%d')}")
+        with col2:
+            st.metric("Total Records", f"{len(st.session_state.merged_data):,}")
+        with col3:
+            st.metric("Columns", len(st.session_state.merged_data.columns))
+        return  # Exit early since data is already loaded
+
+    # File upload section (only shown if no data loaded)
     st.subheader("Upload Excel Files")
     uploaded_files = st.file_uploader(
         "Choose Excel files",
@@ -186,8 +242,10 @@ def show_data_upload():
                         merged_df = dataframes[0].set_index('datetime')
                         st.write(f"✅ Single file processed: {merged_df.shape}")
 
-                    # Store processed data
+                    # Store processed data with both names for compatibility
                     st.session_state.processed_data = merged_df
+                    st.session_state.merged_data = merged_df  # Also store as merged_data for consistency
+                    st.session_state.uploaded_files_info = file_info  # Store file info for later reference
 
                 st.success("Files processed successfully!")
 
@@ -257,10 +315,13 @@ def show_historical_analysis():
     st.header("📊 Historical Analysis")
     st.write("Analyze relationships between workforce metrics.")
 
-    # Check if data is available
-    if 'processed_data' not in st.session_state:
+    # Check if data is available (support both names)
+    if 'merged_data' not in st.session_state and 'processed_data' not in st.session_state:
         st.warning("Please upload and process data first in the 'Data Upload & Processing' section.")
         return
+
+    # Use whichever is available
+    data = st.session_state.get('merged_data', st.session_state.get('processed_data'))
 
     # Import analysis modules
     try:
@@ -797,10 +858,13 @@ def show_model_training():
     st.header("🎯 Model Training")
     st.write("Train curve fitting models for FTE prediction.")
 
-    # Check if data is available
-    if 'processed_data' not in st.session_state:
+    # Check if data is available (support both names)
+    if 'merged_data' not in st.session_state and 'processed_data' not in st.session_state:
         st.warning("Please upload and process data first in the 'Data Upload & Processing' section.")
         return
+
+    # Use whichever is available
+    data = st.session_state.get('merged_data', st.session_state.get('processed_data'))
 
     # Import model modules
     try:
@@ -1079,12 +1143,20 @@ def show_forecasting():
 
     st.subheader("📈 Forecast Data Input")
 
+    # Persist input method selection
+    if 'forecast_input_method' not in st.session_state:
+        st.session_state.forecast_input_method = "Use Sample Data (for testing)"
+
     # Input method selection
     input_method = st.radio(
         "Choose forecast data input method:",
         ["Use Sample Data (for testing)", "Manual Entry", "Upload Excel File"],
+        index=["Use Sample Data (for testing)", "Manual Entry", "Upload Excel File"].index(st.session_state.forecast_input_method),
         help="Select how you want to provide forecast call volume and AHT data"
     )
+
+    # Update session state
+    st.session_state.forecast_input_method = input_method
 
     forecast_data = None
 
@@ -1108,36 +1180,53 @@ def show_forecasting():
         st.write("Enter forecast data in tab or space-separated format:")
         st.code("Date    Calls    AHT\n10/12/25    429207    690\n10/19/25    438126    689", language="text")
 
+        # Use session state to preserve input
+        if 'forecast_text_input' not in st.session_state:
+            st.session_state.forecast_text_input = ""
+
         forecast_text = st.text_area(
             "Forecast Data",
+            value=st.session_state.forecast_text_input,
             placeholder="10/12/25\t429207\t690\n10/19/25\t438126\t689\n10/26/25\t484588\t683",
             height=150,
-            help="Enter one row per time period with Date, Calls, and AHT separated by tabs or spaces"
+            help="Enter one row per time period with Date, Calls, and AHT separated by tabs or spaces",
+            key="forecast_textarea"
         )
 
-        if forecast_text.strip():
-            try:
-                lines = [line.strip() for line in forecast_text.strip().split('\n') if line.strip()]
-                parsed_data = []
+        # Update session state
+        st.session_state.forecast_text_input = forecast_text
 
-                for line in lines:
-                    parts = line.split()
-                    if len(parts) >= 3:
-                        date = parts[0]
-                        calls = int(parts[1].replace(',', ''))
-                        aht = float(parts[2])
-                        parsed_data.append({'Date': date, 'Calls': calls, 'AHT': aht})
+        if st.button("📊 Process Forecast Data", type="primary", disabled=not forecast_text.strip()):
+            if forecast_text.strip():
+                try:
+                    lines = [line.strip() for line in forecast_text.strip().split('\n') if line.strip()]
+                    parsed_data = []
 
-                if parsed_data:
-                    forecast_df = pd.DataFrame(parsed_data)
-                    st.write("**Parsed Forecast Data:**")
-                    st.dataframe(forecast_df, use_container_width=True)
-                    forecast_data = forecast_df
-                else:
-                    st.error("Could not parse the forecast data. Please check the format.")
+                    for line in lines:
+                        parts = line.split()
+                        if len(parts) >= 3:
+                            date = parts[0]
+                            calls = int(parts[1].replace(',', ''))
+                            aht = float(parts[2])
+                            parsed_data.append({'Date': date, 'Calls': calls, 'AHT': aht})
 
-            except Exception as e:
-                st.error(f"Error parsing forecast data: {str(e)}")
+                    if parsed_data:
+                        forecast_df = pd.DataFrame(parsed_data)
+                        st.write("**Parsed Forecast Data:**")
+                        st.dataframe(forecast_df, use_container_width=True)
+                        forecast_data = forecast_df
+                        # Store in session state
+                        st.session_state['forecast_data_manual'] = forecast_df
+                        st.success(f"✅ Processed {len(parsed_data)} forecast periods")
+                    else:
+                        st.error("Could not parse the forecast data. Please check the format.")
+
+                except Exception as e:
+                    st.error(f"Error parsing forecast data: {str(e)}")
+
+        # Check if we have processed data from session state
+        if 'forecast_data_manual' in st.session_state and input_method == "Manual Entry":
+            forecast_data = st.session_state['forecast_data_manual']
 
     elif input_method == "Upload Excel File":
         uploaded_file = st.file_uploader(
@@ -1168,6 +1257,9 @@ def show_forecasting():
 
     # FTE Calculation Parameters
     if forecast_data is not None:
+        # Store forecast data in session state for use in Service Level Prediction
+        st.session_state['forecast_data'] = forecast_data
+
         st.subheader("⚙️ FTE Calculation Parameters")
 
         col1, col2 = st.columns(2)
@@ -1177,6 +1269,10 @@ def show_forecasting():
             days_per_week = st.number_input("Days per week", min_value=1, max_value=7, value=5)
             # Hardcode hours per day to 8
             hours_per_day = 8
+
+            # Store in session state
+            st.session_state['hours_per_day'] = hours_per_day
+            st.session_state['days_per_week'] = days_per_week
 
         with col2:
             # Get target service level from Historical Analysis if available
@@ -1206,6 +1302,9 @@ def show_forecasting():
                                          help="Random variance applied to predicted occupancy in simulations")
             shrinkage_rate = st.slider("Shrinkage Rate", min_value=0, max_value=50, value=30, step=1,
                                       help="Base shrinkage rate for Monte Carlo simulations")
+
+            # Store parameters in session state
+            st.session_state['shrinkage_rate'] = shrinkage_rate
 
         # Calculate FTE Requirements
         if st.button("🚀 Simulate FTE Requirements", type="primary"):
@@ -1245,7 +1344,9 @@ def show_forecasting():
                     elif model_type == 'exponential' and len(popt) >= 3:
                         predicted_occupancy = max(50, min(95, (popt[0] * np.exp(popt[1] * target_service_level) + popt[2]) * 100))
                     elif model_type == 'power' and len(popt) >= 3:
-                        predicted_occupancy = max(50, min(95, popt[0] * (target_service_level ** popt[1]) + popt[2]))
+                        def power_func(x, a, b, c):
+                            return a * np.power(np.abs(x + 0.001), b) + c
+                        predicted_occupancy = max(50, min(95, power_func(target_service_level, *popt) * 100))
                     elif model_type == 'logarithmic' and len(popt) >= 2:
                         predicted_occupancy = max(50, min(95, (popt[0] * np.log(target_service_level + 0.001) + popt[1]) * 100))
                     else:
@@ -1370,7 +1471,8 @@ def show_forecasting():
                         mode='lines',
                         name='FTE P10 (Optimistic)',
                         line=dict(color='rgb(0,100,80)', width=1, dash='dash'),
-                        hovertemplate='Period: %{x}<br>Low Estimate: %{y}<extra></extra>'
+                        hovertemplate='Period: %{x}<br>Low Estimate: %{y}<extra></extra>',
+                        showlegend=False
                     ))
 
                     # Add high bound line
@@ -1380,7 +1482,8 @@ def show_forecasting():
                         mode='lines',
                         name='FTE P90 (Conservative)',
                         line=dict(color='rgb(0,100,80)', width=1, dash='dash'),
-                        hovertemplate='Period: %{x}<br>High Estimate: %{y}<extra></extra>'
+                        hovertemplate='Period: %{x}<br>High Estimate: %{y}<extra></extra>',
+                        showlegend=False
                     ))
 
                     # Update layout
@@ -1491,13 +1594,6 @@ def show_forecasting():
         - Include 15-20% shrinkage for breaks and training
         - Round up FTE to ensure service level targets are met
         """)
-
-def show_service_level_prediction():
-    """Service level prediction interface"""
-    st.header("= Service Level Prediction")
-    st.write("Predict service levels based on staffing plans.")
-
-    st.info("=� Service level prediction functionality will be implemented here")
 
 def show_settings():
     """Application settings interface"""

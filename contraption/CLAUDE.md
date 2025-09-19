@@ -79,6 +79,10 @@ python -m src.main
 
 5. **Volume-Weighted Relationships**: Maintained proper volume weighting throughout curve fitting process to ensure larger volume periods have appropriate influence on model parameters.
 
+6. **Service Level Prediction Feature**: Implemented comprehensive reverse prediction module (`src/service_level_prediction.py`) that calculates expected service levels based on actual FTE staffing plans and forecast workload.
+
+7. **Input Method Persistence**: Fixed session state management to remember user input method selections and pasted data when navigating between Forecasting and Service Level Prediction sections.
+
 ### Key Technical Features
 - **Monte Carlo FTE Simulation**: Configurable variance parameters for realistic staffing projections
 - **Multi-Model Curve Fitting**: Automatic selection from 5+ curve types with weighted optimization
@@ -134,13 +138,16 @@ for test_model_type in models_to_try:
 ### Key Files & Functions
 - **`main.py:600-750`**: Weighted auto-selection curve fitting algorithm
 - **`main.py:1240-1265`**: Service Level → Occupancy prediction with proper model application
+- **`main.py:1146-1159`**: Forecast input method persistence implementation
 - **`main.py:850-950`**: Target intersection calculation and visualization
 - **`main.py:1100-1200`**: Volume-weighted relationship processing
 - **`main.py:300-400`**: Excel data processing and timestamp merging
+- **`src/service_level_prediction.py`**: Complete reverse prediction module (FTE → Service Level)
+- **`src/service_level_prediction.py:60-73`**: FTE input method persistence implementation
 
 ## Notes & Context
 - Virtual environment: `contraption/venv/` (to be created)
-- Primary workflow: Excel upload → data processing → model training → forecasting → visualization
+- Primary workflow: Excel upload → data processing → model training → forecasting → service level prediction → visualization
 - Key domain concepts: FTE (Full-Time Equivalent), Service Level, AHT (Average Handle Time), Occupancy
 - Data sources: Historical Excel files with timestamp-based metrics
 - Output: Predictive models, FTE recommendations, service level projections
