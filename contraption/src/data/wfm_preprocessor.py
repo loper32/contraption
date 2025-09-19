@@ -28,7 +28,7 @@ class WFMPreprocessor:
                 'interval_col': ['Interval', 'interval', 'INTERVAL', 'Time', 'time'],
                 'metrics': {
                     'service_level': ['%SL', '%sl', 'Service Level', 'SL%', 'sl%'],
-                    'abandonment_rate': ['%Aban', '%aban', 'Abandon%', 'abandon%', 'Abandonment Rate'],
+                    'abandonment_rate': ['%Aban', '%aban', 'Abandon%', 'abandon%', 'Abandonment Rate', 'abandonment', 'Abandonment'],
                     'average_speed_answer': ['ASA', 'asa', 'Average Speed Answer', 'Avg Speed Answer'],
                     'average_handle_time': ['AHT', 'aht', 'Average Handle Time', 'Avg Handle Time'],
                     'offered': ['Offered', 'offered', 'OFFERED', 'Calls Offered'],

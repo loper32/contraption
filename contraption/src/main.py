@@ -13,6 +13,14 @@ from pathlib import Path
 # Import service level prediction module
 from src.service_level_prediction import show_service_level_prediction
 
+# Import convergence modules
+from src.convergence import (
+    ConvergenceEngine,
+    create_convergence_config,
+    create_relationship_predictor_from_models,
+    BinarySearchSolver
+)
+
 # Configure page
 st.set_page_config(
     page_title="Contraption - WFM Analytics",
@@ -47,9 +55,9 @@ def main():
                 "🏠 Home",
                 "📁 Data Upload & Processing",
                 "📊 Historical Analysis",
-                "🔧 Model Training",
                 "📈 Forecasting",
                 "🎯 Service Level Prediction",
+                "🔄 Convergence Analysis",
                 "⚙️ Settings"
             ],
             index=1,  # Default to Data Upload & Processing
@@ -66,12 +74,12 @@ def main():
         show_data_upload()
     elif page == "Historical Analysis":
         show_historical_analysis()
-    elif page == "Model Training":
-        show_model_training()
     elif page == "Forecasting":
         show_forecasting()
     elif page == "Service Level Prediction":
         show_service_level_prediction()
+    elif page == "Convergence Analysis":
+        show_convergence_analysis()
     elif page == "Settings":
         show_settings()
 
@@ -95,8 +103,12 @@ def show_home():
     - Calculate FTE requirements with configurable assumptions
 
     ### = **Service Level Prediction**
-    - Run convergence algorithms to predict service levels
+    - Predict service levels based on actual staffing plans
     - Analyze staffing scenarios and their outcomes
+
+    ### 🔄 **Convergence Analysis**
+    - Advanced dual-loop convergence algorithms
+    - Account for abandon/retry cycles and occupancy stress effects
 
     ### =� **Visualization & Reporting**
     - Interactive plots and dashboards
@@ -420,22 +432,51 @@ def show_historical_analysis():
             for idx, rel in enumerate(key_relationships):
                 with cols[idx]:
                     try:
+                        # Handle column name variations with fallback logic
+                        x_col = rel['x_metric']
+                        y_col = rel['y_metric']
+
+                        # Check if columns exist, try alternatives if not
+                        if x_col not in df.columns:
+                            st.error(f"Column '{x_col}' not found in DataFrame for {rel['name']}")
+                            continue
+
+                        if y_col not in df.columns:
+                            # Try common variations for y_metric
+                            alternatives = {
+                                'abandonment_rate': ['abandonment', 'abandon_rate', '%aban', 'abandon%'],
+                                'average_handle_time': ['aht', 'handle_time', 'avg_handle_time']
+                            }
+                            found_alternative = None
+                            if y_col in alternatives:
+                                for alt in alternatives[y_col]:
+                                    if alt in df.columns:
+                                        found_alternative = alt
+                                        st.warning(f"Using '{alt}' instead of '{y_col}' for {rel['name']}")
+                                        break
+
+                            if found_alternative:
+                                y_col = found_alternative
+                            else:
+                                st.error(f"Column '{y_col}' not found in DataFrame for {rel['name']}. Available columns: {list(df.columns)}")
+                                continue
+
                         # Get clean data with volume weighting
                         if volume_col:
-                            data_subset = df[[rel['x_metric'], rel['y_metric'], volume_col]].dropna()
+                            data_subset = df[[x_col, y_col, volume_col]].dropna()
                             weights = data_subset[volume_col].values
                             # Normalize weights to prevent numerical issues
                             weights = weights / weights.mean()
                         else:
-                            data_subset = df[[rel['x_metric'], rel['y_metric']]].dropna()
+                            data_subset = df[[x_col, y_col]].dropna()
                             weights = None
 
                         if len(data_subset) < 10:
                             st.error(f"Not enough data for {rel['name']}")
                             continue
 
-                        x_data = data_subset[rel['x_metric']].values
-                        y_data = data_subset[rel['y_metric']].values
+                        x_data = data_subset[x_col].values
+                        y_data = data_subset[y_col].values
 
                         # Fit weighted curve using scipy directly for better control
                         if weights is not None and rel['curve_type'] == 'auto':
@@ -778,9 +819,11 @@ def show_historical_analysis():
                             'parameters': popt,
                             'r_squared': r_squared,
                             'model_type': model_type,
-                            'x_metric': rel['x_metric'],
-                            'y_metric': rel['y_metric'],
-                            'weighted': weights is not None
+                            'x_metric': rel['x_metric'],  # Always use standardized names
+                            'y_metric': rel['y_metric'],  # Always use standardized names
+                            'weighted': weights is not None,
+                            'actual_x_column': x_col,    # Track actual column used
+                            'actual_y_column': y_col     # Track actual column used
                         }
 
                         # Store intersection value if calculated
@@ -805,18 +848,16 @@ def show_historical_analysis():
                 # Also store in the format expected by forecasting section
                 fitted_relationships = []
                 for name, model in fitted_models.items():
-                    # Parse relationship name to get metrics
-                    if ' → ' in name:
-                        x_metric, y_metric = name.split(' → ')
-                        fitted_relationships.append({
-                            'name': name,
-                            'x_metric': x_metric.lower().replace(' ', '_'),
-                            'y_metric': y_metric.lower().replace(' ', '_'),
-                            'model_type': model['model_type'],
-                            'parameters': model['parameters'],
-                            'r_squared': model['r_squared'],
-                            'quality': 'Good' if model['r_squared'] > 0.7 else 'Fair' if model['r_squared'] > 0.5 else 'Poor'
-                        })
+                    # Use the actual metric names from the model data (not parsed from name)
+                    fitted_relationships.append({
+                        'name': name,
+                        'x_metric': model['x_metric'],  # Use actual field names from model
+                        'y_metric': model['y_metric'],  # Use actual field names from model
+                        'model_type': model['model_type'],
+                        'parameters': model['parameters'],
+                        'r_squared': model['r_squared'],
+                        'quality': 'Good' if model['r_squared'] > 0.7 else 'Fair' if model['r_squared'] > 0.5 else 'Poor'
+                    })
 
                 st.session_state.fitted_relationships = fitted_relationships
 
@@ -853,265 +894,6 @@ def show_historical_analysis():
                         if model['weighted']:
                             st.caption("📊 Volume-weighted fit")
 
-def show_model_training():
-    """Model training interface"""
-    st.header("🎯 Model Training")
-    st.write("Train curve fitting models for FTE prediction.")
-
-    # Check if data is available (support both names)
-    if 'merged_data' not in st.session_state and 'processed_data' not in st.session_state:
-        st.warning("Please upload and process data first in the 'Data Upload & Processing' section.")
-        return
-
-    # Use whichever is available
-    data = st.session_state.get('merged_data', st.session_state.get('processed_data'))
-
-    # Import model modules
-    try:
-        from models.curve_fitting import FTEPredictionModel
-        import plotly.graph_objects as go
-        from plotly.subplots import make_subplots
-    except ImportError:
-        st.error("Model modules not found. Please ensure the project is properly set up.")
-        return
-
-    # Initialize model
-    if 'fte_model' not in st.session_state:
-        st.session_state.fte_model = FTEPredictionModel()
-
-    df = st.session_state.processed_data
-
-    # Model configuration
-    st.subheader("Model Configuration")
-
-    col1, col2 = st.columns(2)
-
-    with col1:
-        # Select target variable (FTE-related metrics)
-        numeric_columns = df.select_dtypes(include=[np.number]).columns.tolist()
-        fte_candidates = [col for col in numeric_columns if any(term in col.lower()
-                         for term in ['fte', 'headcount', 'staff', 'agents', 'employees'])]
-
-        if not fte_candidates:
-            fte_candidates = numeric_columns
-
-        target_variable = st.selectbox(
-            "Target Variable (FTE/Staffing)",
-            fte_candidates,
-            help="Select the FTE or staffing metric to predict"
-        )
-
-    with col2:
-        # Select predictor variables
-        predictor_candidates = [col for col in numeric_columns if col != target_variable]
-
-        predictor_variables = st.multiselect(
-            "Predictor Variables",
-            predictor_candidates,
-            default=predictor_candidates[:3] if len(predictor_candidates) >= 3 else predictor_candidates,
-            help="Select metrics to use for FTE prediction"
-        )
-
-    if not predictor_variables:
-        st.warning("Please select at least one predictor variable.")
-        return
-
-    # Model type selection
-    st.subheader("Model Selection")
-
-    model_type = st.selectbox(
-        "Model Type",
-        ["auto", "linear", "exponential", "power", "logarithmic", "polynomial"],
-        help="Choose the curve fitting approach (auto selects best model)"
-    )
-
-    if model_type == "polynomial":
-        polynomial_degree = st.slider("Polynomial Degree", 2, 5, 3)
-    else:
-        polynomial_degree = 2
-
-    # Train models button
-    if st.button("Train Models", type="primary"):
-        with st.spinner("Training curve fitting models..."):
-            try:
-                trained_models = {}
-
-                for predictor in predictor_variables:
-                    # Prepare data
-                    data_subset = df[[predictor, target_variable]].dropna()
-
-                    if len(data_subset) < 5:
-                        st.warning(f"Not enough data points for {predictor} -> {target_variable}")
-                        continue
-
-                    x_data = data_subset[predictor].values
-                    y_data = data_subset[target_variable].values
-
-                    # Fit model
-                    if model_type == "polynomial":
-                        model_result = st.session_state.fte_model.fit_model(
-                            x_data, y_data, "polynomial", polynomial_degree
-                        )
-                    else:
-                        model_result = st.session_state.fte_model.fit_model(
-                            x_data, y_data, model_type
-                        )
-
-                    if model_result['fitted']:
-                        model_result['predictor'] = predictor
-                        model_result['target'] = target_variable
-                        trained_models[predictor] = model_result
-
-                # Store trained models
-                st.session_state.trained_models = trained_models
-
-                if trained_models:
-                    st.success(f"Successfully trained {len(trained_models)} model(s)!")
-                else:
-                    st.error("No models could be trained. Check your data and try again.")
-
-            except Exception as e:
-                st.error(f"Error training models: {str(e)}")
-
-    # Display model results
-    if 'trained_models' in st.session_state and st.session_state.trained_models:
-        st.subheader("Model Training Results")
-
-        # Model performance summary
-        model_summary_data = []
-        for predictor, model in st.session_state.trained_models.items():
-            model_summary_data.append({
-                'Predictor': predictor,
-                'Model Type': model['model_type'],
-                'R²': f"{model['r_squared']:.3f}",
-                'RMSE': f"{model['rmse']:.3f}",
-                'MAE': f"{model['mae']:.3f}",
-                'AIC': f"{model['aic']:.2f}",
-                'Quality': st.session_state.fte_model._assess_model_quality(model)
-            })
-
-        summary_df = pd.DataFrame(model_summary_data)
-        st.dataframe(summary_df, use_container_width=True)
-
-        # Visualize models
-        st.subheader("Model Visualizations")
-
-        for predictor, model in st.session_state.trained_models.items():
-            with st.expander(f"📈 {predictor} → {target_variable} Model"):
-
-                # Create model plot
-                x_data = model['x_data']
-                y_data = model['y_data']
-                y_pred = model['y_predicted']
-
-                # Generate smooth curve for plotting
-                x_smooth = np.linspace(x_data.min(), x_data.max(), 100)
-                y_smooth = st.session_state.fte_model.predict(model, x_smooth)
-
-                fig = go.Figure()
-
-                # Add actual data points
-                fig.add_trace(go.Scatter(
-                    x=x_data,
-                    y=y_data,
-                    mode='markers',
-                    name='Actual Data',
-                    marker=dict(color='blue', size=8)
-                ))
-
-                # Add fitted curve
-                fig.add_trace(go.Scatter(
-                    x=x_smooth,
-                    y=y_smooth,
-                    mode='lines',
-                    name=f'Fitted {model["model_type"].title()} Model',
-                    line=dict(color='red', width=2)
-                ))
-
-                fig.update_layout(
-                    title=f'{predictor} vs {target_variable} - {model["model_type"].title()} Model',
-                    xaxis_title=predictor,
-                    yaxis_title=target_variable,
-                    template='plotly_white'
-                )
-
-                st.plotly_chart(fig, use_container_width=True)
-
-                # Model details
-                col1, col2 = st.columns(2)
-
-                with col1:
-                    st.write("**Model Performance:**")
-                    st.write(f"- R²: {model['r_squared']:.3f}")
-                    st.write(f"- RMSE: {model['rmse']:.3f}")
-                    st.write(f"- MAE: {model['mae']:.3f}")
-
-                with col2:
-                    st.write("**Model Parameters:**")
-                    for i, param in enumerate(model['parameters']):
-                        st.write(f"- Parameter {i+1}: {param:.4f}")
-
-        # Model prediction interface
-        st.subheader("Make Predictions")
-
-        # Select model for prediction
-        model_for_prediction = st.selectbox(
-            "Select Model for Prediction",
-            list(st.session_state.trained_models.keys()),
-            key="prediction_model"
-        )
-
-        if model_for_prediction:
-            selected_model = st.session_state.trained_models[model_for_prediction]
-
-            # Input for prediction
-            predictor_name = selected_model['predictor']
-            min_val = float(selected_model['x_data'].min())
-            max_val = float(selected_model['x_data'].max())
-
-            prediction_input = st.number_input(
-                f"Enter {predictor_name} value:",
-                min_value=min_val * 0.5,
-                max_value=max_val * 1.5,
-                value=(min_val + max_val) / 2,
-                help=f"Training data range: {min_val:.2f} to {max_val:.2f}"
-            )
-
-            if st.button("Predict FTE"):
-                try:
-                    # Make prediction
-                    prediction = st.session_state.fte_model.predict(
-                        selected_model, prediction_input
-                    )[0]
-
-                    # Calculate prediction intervals
-                    lower_bound, upper_bound = st.session_state.fte_model.calculate_prediction_intervals(
-                        selected_model, np.array([prediction_input])
-                    )
-
-                    st.success(f"**Predicted {target_variable}: {prediction:.2f}**")
-                    st.write(f"95% Prediction Interval: [{lower_bound[0]:.2f}, {upper_bound[0]:.2f}]")
-
-                except Exception as e:
-                    st.error(f"Prediction failed: {str(e)}")
-
-        # Export models option
-        st.subheader("Export Models")
-
-        if st.button("Generate Model Report"):
-            with st.spinner("Generating model report..."):
-                report_data = {}
-
-                for predictor, model in st.session_state.trained_models.items():
-                    summary = st.session_state.fte_model.generate_model_summary(model)
-                    report_data[predictor] = summary
-
-                st.session_state.model_report = report_data
-                st.success("Model report generated!")
-
-        if 'model_report' in st.session_state:
-            st.write("**Model Report:**")
-            st.json(st.session_state.model_report)
 
 def show_forecasting():
     """Forecasting interface - FTE prediction using curve fitting relationships"""
@@ -1163,12 +945,15 @@ def show_forecasting():
     if input_method == "Use Sample Data (for testing)":
         st.info("Using realistic sample forecast data based on industry patterns")
 
-        # Create sample data similar to WFM project
+        # Create sample data with 20 weeks of realistic forecast data
         sample_data = {
-            'Period': ['Week 1', 'Week 2', 'Week 3', 'Week 4'],
-            'Date': ['10/12/25', '10/19/25', '10/26/25', '11/02/25'],
-            'Calls': [429207, 438126, 484588, 539239],
-            'AHT': [690, 689, 683, 679]
+            'Period': [f'Week {i+1}' for i in range(20)],
+            'Date': ['10/12/25', '10/19/25', '10/26/25', '11/02/25', '11/09/25', '11/16/25', '11/23/25', '11/30/25',
+                    '12/07/25', '12/14/25', '12/21/25', '12/28/25', '01/04/26', '01/11/26', '01/18/26', '01/25/26',
+                    '02/01/26', '02/08/26', '02/15/26', '02/22/26'],
+            'Calls': [429207, 438126, 484588, 539239, 533150, 549506, 427620, 743309, 471900, 456828, 359031, 638468,
+                     718116, 583131, 495801, 573089, 507601, 502630, 473334, 483598],
+            'AHT': [690, 689, 683, 679, 684, 685, 675, 678, 683, 682, 667, 693, 670, 680, 679, 677, 678, 677, 679, 677]
         }
         forecast_df = pd.DataFrame(sample_data)
 
@@ -1594,6 +1379,491 @@ def show_forecasting():
         - Include 15-20% shrinkage for breaks and training
         - Round up FTE to ensure service level targets are met
         """)
+
+def show_convergence_analysis():
+    """Convergence analysis interface using Service Level Prediction outputs as starting point"""
+    st.header("🔄 Convergence Analysis")
+    st.write("Advanced convergence algorithms that refine Service Level predictions using dual-loop feedback calculations.")
+
+    st.markdown("""
+    ### How Convergence Analysis Works
+
+    This section takes the outputs from **Service Level Prediction** and refines them using sophisticated
+    **dual-loop convergence algorithms** that account for feedback loops:
+
+    **🔄 Loop A: Call Volume Feedback**
+    - Service Level → Abandon Rate → Retry Calls → Total Calls → New Occupancy → New Service Level
+
+    **🔄 Loop B: Occupancy/AHT Feedback**
+    - Occupancy → Adjusted AHT → Final Workload → Final Occupancy → Final Service Level
+
+    These loops iterate until the service level predictions stabilize within tolerance.
+    """)
+
+    # ===== COMPREHENSIVE WORKFLOW VALIDATION =====
+    st.subheader("🔍 Workflow Prerequisites Validation")
+
+    validation_issues = []
+
+    # Check 1: Service Level Prediction results
+    if 'sl_prediction_results' not in st.session_state:
+        validation_issues.append("❌ **Service Level Prediction not completed** - Please run the Service Level Prediction section first")
+    else:
+        st.success("✅ Service Level Prediction results found")
+
+    # Check 2: Historical data and models
+    if 'wfm_relationship_models' not in st.session_state or not st.session_state.wfm_relationship_models:
+        validation_issues.append("❌ **No trained models found** - Please run Historical Analysis → Generate WFM Relationship Curves first")
+    else:
+        models = st.session_state.wfm_relationship_models
+        st.success(f"✅ Found {len(models)} trained models from Historical Analysis")
+
+        # Check for required relationships
+        required_relationships = [
+            ('service_level', 'occupancy', 'Service Level → Occupancy'),
+            ('occupancy', 'service_level', 'Occupancy → Service Level'),
+            ('service_level', 'abandonment_rate', 'Service Level → Abandonment'),
+            ('occupancy', 'average_handle_time', 'Occupancy → AHT')
+        ]
+
+        found_relationships = []
+        missing_relationships = []
+
+        for x_metric, y_metric, display_name in required_relationships:
+            found = False
+            for model_name, model_data in models.items():
+                if (model_data and
+                    model_data.get('x_metric') == x_metric and
+                    model_data.get('y_metric') == y_metric):
+                    found_relationships.append(f"✅ {display_name}")
+                    found = True
+                    break
+
+            if not found and (x_metric, y_metric) in [('service_level', 'occupancy'), ('occupancy', 'service_level')]:
+                missing_relationships.append(f"❌ {display_name} (CRITICAL)")
+            elif not found:
+                missing_relationships.append(f"⚠️ {display_name} (optional)")
+
+        # Display relationship status
+        with st.expander("📊 Available Model Relationships", expanded=bool(missing_relationships)):
+            for rel in found_relationships:
+                st.write(rel)
+            for rel in missing_relationships:
+                if "CRITICAL" in rel:
+                    st.error(rel)
+                else:
+                    st.warning(rel)
+
+    # Check 3: Forecast data
+    if 'forecast_data' not in st.session_state:
+        validation_issues.append("❌ **No forecast data found** - Please complete the Forecasting section first")
+    else:
+        st.success("✅ Forecast data available")
+
+    # Show validation summary
+    if validation_issues:
+        st.error("**Convergence Analysis cannot proceed due to missing prerequisites:**")
+        for issue in validation_issues:
+            st.write(issue)
+
+        st.info("""
+        **Required Workflow Order:**
+        1. 📁 **Data Upload & Processing** - Load historical data
+        2. 📊 **Historical Analysis** - Generate WFM Relationship Curves (especially Service Level ↔ Occupancy)
+        3. 📈 **Forecasting** - Load forecast data and calculate FTE requirements
+        4. 🎯 **Service Level Prediction** - Generate baseline service level predictions
+        5. 🔄 **Convergence Analysis** - Refine predictions with advanced algorithms
+        """)
+        return
+
+    # Debug model information if all checks pass
+    with st.expander("🔧 Debug: Model Information", expanded=False):
+        models = st.session_state.wfm_relationship_models
+        st.write(f"**Found {len(models)} models in session state:**")
+        for model_name, model_data in models.items():
+            if model_data:
+                st.write(f"- **{model_name}**: {model_data.get('x_metric', 'N/A')} → {model_data.get('y_metric', 'N/A')} "
+                        f"({model_data.get('model_type', 'N/A')}, R²={model_data.get('r_squared', 'N/A'):.3f})")
+            else:
+                st.write(f"- **{model_name}**: ❌ Empty model data")
+
+    # Check for Service Level Prediction results
+    if 'sl_prediction_results' not in st.session_state:
+        st.error("Critical error: This should not happen after validation above.")
+        return
+
+    # Get SL prediction results
+    sl_results = st.session_state['sl_prediction_results']
+    results_data = sl_results['results_data']
+    models = sl_results['models']
+    parameters = sl_results['parameters']
+
+    st.success("✅ Service Level Prediction results found! Ready for convergence refinement.")
+
+    # Show summary of starting conditions
+    st.subheader("📊 Starting Conditions from Service Level Prediction")
+
+    # Display summary table
+    summary_df = pd.DataFrame([
+        {
+            'Period': r['Period'],
+            'FTE': r['Actual FTE'],
+            'Calls': r['Call Volume'].replace(',', ''),
+            'AHT (s)': r['AHT (sec)'],
+            'Occupancy (%)': r['Occupancy %'],
+            'Initial SL (%)': r['Predicted SL %'],
+            'Abandon (%)': r.get('Abandon %', 'N/A')
+        }
+        for r in results_data
+    ])
+
+    st.dataframe(summary_df, use_container_width=True, hide_index=True)
+
+    # Configuration section (simplified)
+    st.subheader("⚙️ Convergence Configuration")
+
+    col1, col2, col3 = st.columns(3)
+
+    with col1:
+        max_iterations = st.slider("Max Iterations", 5, 20, 10,
+                                 help="Maximum number of convergence iterations")
+        tolerance = st.slider("Tolerance (%)", 0.1, 2.0, 1.0, 0.1,
+                            help="Convergence tolerance percentage") / 100
+
+    with col2:
+        retry_rate = st.slider("Retry Rate (%)", 10, 50, 30,
+                             help="Percentage of abandoned calls that retry") / 100
+        damping_factor = st.slider("Damping Factor", 0.5, 1.0, 0.7, 0.1,
+                                 help="Damping to prevent oscillation")
+
+    with col3:
+        debug_mode = st.checkbox("Debug Mode", help="Show detailed iteration logs")
+
+    # Advanced Configuration
+    st.subheader("🎛️ Convergence Mode")
+    convergence_mode = st.radio(
+        "Choose convergence approach:",
+        options=["Conservative (Percentage-based)", "Aggressive (Model-driven)"],
+        index=0,
+        help="""
+        **Conservative**: Applies percentage changes from trained models to starting data. Better for short-term planning with reliable starting conditions.
+
+        **Aggressive**: Uses direct model predictions. Better for long-term planning or when starting data may be outdated.
+        """
+    )
+
+    use_percentage_based = convergence_mode == "Conservative (Percentage-based)"
+
+    if use_percentage_based:
+        max_percentage_change = st.slider(
+            "Maximum Change per Iteration (%)",
+            10, 50, 30, 5,
+            help="Maximum percentage change allowed per iteration in conservative mode"
+        ) / 100
+    else:
+        max_percentage_change = 1.0  # Not used in aggressive mode
+
+    run_all_periods = st.checkbox("Run All Periods", value=True,
+                                help="Run convergence for all periods, or select one")
+
+    # Period selection (if not running all)
+    selected_periods = []
+    if not run_all_periods:
+        st.subheader("📅 Period Selection")
+        period_options = [r['Period'] for r in results_data]
+        selected_period = st.selectbox("Select period to analyze:", period_options)
+        selected_periods = [i for i, r in enumerate(results_data) if r['Period'] == selected_period]
+    else:
+        selected_periods = list(range(len(results_data)))
+
+    # Run convergence analysis
+    if st.button("🚀 Run Convergence Analysis", type="primary"):
+        try:
+            convergence_results = []
+
+            # Create convergence configuration
+            config = create_convergence_config('service_level')
+            config.max_iterations = max_iterations
+            config.tolerance = tolerance
+            config.retry_rate = retry_rate
+            config.shrinkage = parameters['shrinkage_rate'] / 100
+            config.damping_factor = damping_factor
+            config.use_percentage_based_changes = use_percentage_based
+            config.max_percentage_change = max_percentage_change
+            config.debug_enabled = debug_mode
+            config.log_iterations = debug_mode
+
+            # ===== ENHANCED MODEL VALIDATION =====
+            st.info("🔍 **Validating models before convergence analysis...**")
+
+            # Debug the exact models being passed
+            if debug_mode:
+                st.write("**Debug: Models being passed to convergence engine:**")
+                for model_name, model_data in models.items():
+                    if model_data:
+                        st.write(f"- {model_name}: x_metric='{model_data.get('x_metric')}', y_metric='{model_data.get('y_metric')}', type='{model_data.get('model_type')}'")
+                    else:
+                        st.write(f"- {model_name}: ❌ None or empty")
+
+            # Pre-validate critical relationships before creating the predictor
+            critical_relationships = [
+                ('service_level', 'occupancy'),
+                ('occupancy', 'service_level')
+            ]
+
+            has_critical_relationship = False
+            for x_metric, y_metric in critical_relationships:
+                for model_name, model_data in models.items():
+                    if (model_data and
+                        model_data.get('x_metric') == x_metric and
+                        model_data.get('y_metric') == y_metric):
+                        has_critical_relationship = True
+                        st.success(f"✅ Found critical relationship: {x_metric} → {y_metric}")
+                        break
+
+            if not has_critical_relationship:
+                st.error("❌ **Critical Error**: No Service Level ↔ Occupancy relationship found in models!")
+                st.error("**Available models:**")
+                for model_name, model_data in models.items():
+                    if model_data:
+                        st.write(f"- {model_name}: {model_data.get('x_metric', 'N/A')} → {model_data.get('y_metric', 'N/A')}")
+                st.error("""
+                **Required Fix**: Please go back to **📊 Historical Analysis** and:
+                1. Click "Generate All WFM Relationship Curves"
+                2. Ensure the first relationship shows "Service Level → Occupancy"
+                3. Then return to **🎯 Service Level Prediction** and re-run it
+                4. Finally, try Convergence Analysis again
+                """)
+                return
+
+            # Create relationship predictor from models
+            try:
+                relationship_predictor = create_relationship_predictor_from_models(models)
+                st.success("✅ Relationship predictor created successfully")
+            except ValueError as e:
+                st.error(f"❌ **Failed to create relationship predictor**: {str(e)}")
+                st.error("""
+                **This error indicates that the trained models are not in the expected format.**
+
+                **Troubleshooting Steps:**
+                1. Go to **📊 Historical Analysis**
+                2. Click "Generate All WFM Relationship Curves" to retrain models
+                3. Verify the Service Level → Occupancy relationship is shown
+                4. Return to **🎯 Service Level Prediction** and re-run
+                5. Try Convergence Analysis again
+
+                **If the problem persists, please check the browser console for additional error details.**
+                """)
+                return
+
+            # Progress bar for multiple periods
+            if len(selected_periods) > 1:
+                progress_bar = st.progress(0)
+                status_text = st.empty()
+
+            # Run convergence for selected periods
+            for idx, period_idx in enumerate(selected_periods):
+                period_data = results_data[period_idx]
+
+                if len(selected_periods) > 1:
+                    progress = (idx + 1) / len(selected_periods)
+                    progress_bar.progress(progress)
+                    status_text.text(f"Processing {period_data['Period']} ({idx + 1}/{len(selected_periods)})...")
+
+                # Extract values from SL prediction results
+                base_calls = float(period_data['Call Volume'].replace(',', ''))
+                base_aht = float(period_data['AHT (sec)'])
+                planned_fte = period_data['Actual FTE']
+
+                # Create convergence engine
+                convergence_engine = ConvergenceEngine(config)
+
+                # Run convergence analysis
+                with st.spinner(f"Running convergence for {period_data['Period']}..."):
+                    if debug_mode:
+                        st.write(f"**Debug - Starting convergence for {period_data['Period']}:**")
+                        st.write(f"- Base calls: {base_calls:,.0f}")
+                        st.write(f"- Base AHT: {base_aht:.0f}s")
+                        st.write(f"- Planned FTE: {planned_fte}")
+
+                    result = convergence_engine.iterate_convergence(
+                        base_calls=base_calls,
+                        base_aht=base_aht,
+                        planned_fte=planned_fte,
+                        period="weekly",  # Use the period type from parameters
+                        relationship_predictor=relationship_predictor
+                    )
+
+                # Store period information with result
+                result.period_name = period_data['Period']
+                result.initial_sl_prediction = float(period_data['Predicted SL %'].replace('%', '')) / 100
+
+                convergence_results.append(result)
+
+            # Clear progress indicators
+            if len(selected_periods) > 1:
+                progress_bar.empty()
+                status_text.empty()
+
+            # Store results
+            st.session_state['convergence_results'] = convergence_results
+
+            # Display results
+            st.success(f"✅ Convergence analysis completed for {len(convergence_results)} period(s)")
+
+            # Results comparison table
+            st.subheader("📈 Convergence Results Comparison")
+
+            comparison_data = []
+            for result in convergence_results:
+                comparison_data.append({
+                    'Period': result.period_name,
+                    'Initial SL (%)': f"{result.initial_sl_prediction:.1%}",
+                    'Converged SL (%)': f"{result.final_service_level:.1%}",
+                    'SL Change (%)': f"{(result.final_service_level - result.initial_sl_prediction):.1%}",
+                    'Final Abandon (%)': f"{result.final_abandon_rate:.2%}",
+                    'Final Occupancy (%)': f"{result.final_occupancy:.1%}",
+                    'Final Calls': f"{result.final_calls:.0f}",
+                    'Final AHT (s)': f"{result.final_aht:.0f}",
+                    'Iterations': result.iterations,
+                    'Converged': '✅' if result.converged else '❌'
+                })
+
+            comparison_df = pd.DataFrame(comparison_data)
+            st.dataframe(comparison_df, use_container_width=True, hide_index=True)
+
+            # Detailed results for each period
+            for i, result in enumerate(convergence_results):
+                with st.expander(f"📊 Detailed Results: {result.period_name}", expanded=len(convergence_results) == 1):
+                    col1, col2, col3, col4, col5 = st.columns(5)
+
+                    with col1:
+                        delta_sl = result.final_service_level - result.initial_sl_prediction
+                        st.metric("Final Service Level", f"{result.final_service_level:.1%}",
+                                 delta=f"{delta_sl:.1%}")
+
+                    with col2:
+                        st.metric("Final Abandon Rate", f"{result.final_abandon_rate:.2%}")
+
+                    with col3:
+                        st.metric("Final Occupancy", f"{result.final_occupancy:.1%}")
+
+                    with col4:
+                        delta_calls = result.final_calls - result.base_calls
+                        st.metric("Final Calls", f"{result.final_calls:.0f}",
+                                 delta=f"{delta_calls:.0f}")
+
+                    with col5:
+                        delta_aht = result.final_aht - result.base_aht
+                        st.metric("Final AHT", f"{result.final_aht:.0f}s",
+                                 delta=f"{delta_aht:.0f}s")
+
+                    # Quality indicators
+                    col1, col2, col3 = st.columns(3)
+
+                    with col1:
+                        stability_color = {"excellent": "🟢", "good": "🟡", "fair": "🟠", "poor": "🔴"}
+                        st.write(f"**Stability**: {stability_color.get(result.stability, '⚪')} {result.stability.title()}")
+
+                    with col2:
+                        st.write(f"**Confidence**: {result.confidence:.1%}")
+
+                    with col3:
+                        st.write(f"**Final Error**: {result.final_error:.3%}")
+
+                    # Convergence progression chart
+                    if result.iteration_history:
+                        # Create iteration data for plotting
+                        iterations = [iter_data.iteration for iter_data in result.iteration_history]
+                        service_levels = [iter_data.service_level * 100 for iter_data in result.iteration_history]
+                        convergence_errors = [iter_data.convergence_error * 100 for iter_data in result.iteration_history]
+
+                        # Add initial SL prediction as starting point
+                        iterations = [0] + iterations
+                        service_levels = [result.initial_sl_prediction * 100] + service_levels
+
+                        # Create convergence chart
+                        fig = go.Figure()
+
+                        fig.add_trace(go.Scatter(
+                            x=iterations,
+                            y=service_levels,
+                            mode='lines+markers',
+                            name='Service Level (%)',
+                            line=dict(color='blue', width=2),
+                            marker=dict(size=6)
+                        ))
+
+                        # Highlight the improvement from initial prediction
+                        fig.add_annotation(
+                            x=0, y=result.initial_sl_prediction * 100,
+                            text="Initial SL Prediction",
+                            showarrow=True, arrowhead=2, arrowcolor="red"
+                        )
+
+                        fig.update_layout(
+                            title=f"Convergence Progression: {result.period_name}",
+                            xaxis_title="Iteration",
+                            yaxis_title="Service Level (%)",
+                            hovermode='x unified',
+                            height=400
+                        )
+
+                        st.plotly_chart(fig, use_container_width=True)
+
+                    # Warnings
+                    if result.warnings:
+                        st.subheader("⚠️ Analysis Warnings")
+                        for warning in result.warnings:
+                            st.warning(warning)
+
+            # Summary insights
+            st.subheader("💡 Summary Insights")
+
+            # Calculate average improvements
+            avg_sl_change = np.mean([r.final_service_level - r.initial_sl_prediction for r in convergence_results])
+            max_sl_change = max([abs(r.final_service_level - r.initial_sl_prediction) for r in convergence_results])
+
+            col1, col2, col3 = st.columns(3)
+
+            with col1:
+                st.metric("Average SL Change", f"{avg_sl_change:.1%}")
+
+            with col2:
+                st.metric("Largest SL Change", f"{max_sl_change:.1%}")
+
+            with col3:
+                converged_count = sum(1 for r in convergence_results if r.converged)
+                st.metric("Convergence Rate", f"{converged_count}/{len(convergence_results)}")
+
+            if abs(avg_sl_change) > 0.02:  # More than 2% change
+                if avg_sl_change > 0:
+                    st.success("✅ **Convergence analysis shows service levels are higher than initial predictions**, indicating the feedback loops have a positive effect.")
+                else:
+                    st.warning("⚠️ **Convergence analysis shows service levels are lower than initial predictions**, indicating negative feedback from abandon/retry cycles and occupancy stress.")
+            else:
+                st.info("ℹ️ **Convergence analysis shows minimal change from initial predictions**, suggesting the basic service level calculations were already quite accurate.")
+
+        except Exception as e:
+            st.error(f"❌ Convergence analysis failed: {str(e)}")
+            if debug_mode:
+                st.exception(e)
+
+    # Information section
+    st.subheader("📚 Understanding Convergence Analysis")
+    st.markdown("""
+    **How This Improves Service Level Predictions:**
+    - **Accounts for Feedback Loops**: Models how service levels affect abandon rates, creating retry calls
+    - **Occupancy Stress Effects**: Models how high occupancy increases AHT due to agent stress
+    - **Iterative Refinement**: Continues until predictions stabilize within tolerance
+    - **Realistic Scenarios**: Provides more accurate predictions for critical capacity planning
+
+    **When Convergence Makes a Difference:**
+    - High abandon rates that generate significant retry volume
+    - High occupancy scenarios where stress affects agent performance
+    - Contact centers with strong correlations between occupancy and AHT
+    - Critical planning scenarios requiring maximum accuracy
+    """)
 
 def show_settings():
     """Application settings interface"""

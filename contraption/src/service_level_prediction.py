@@ -75,20 +75,16 @@ def show_service_level_prediction():
         fte_data = None
 
         if input_method == "Use Sample Data":
-            # Get forecast data to create sample
-            forecast_df = st.session_state.forecast_data
-            num_periods = len(forecast_df)
+            # Use predefined sample FTE data that matches the forecast periods
+            sample_fte_values = [3619.1, 3683.2, 4025.2, 4437.3, 4411.6, 4552.1, 4379.3, 6046.8, 3935.2, 3808.4,
+                               3565.1, 5164.0, 5654.1, 4791.5, 4090.4, 4698.2, 4180.4, 4130.9, 3908.4, 3979.5]
+            sample_dates = ['10/12/25', '10/19/25', '10/26/25', '11/02/25', '11/09/25', '11/16/25', '11/23/25', '11/30/25',
+                          '12/07/25', '12/14/25', '12/21/25', '12/28/25', '01/04/26', '01/11/26', '01/18/26', '01/25/26',
+                          '02/01/26', '02/08/26', '02/15/26', '02/22/26']
 
-            # Generate sample FTE data based on forecast
             sample_fte = []
-            for idx, row in forecast_df.iterrows():
-                period = row.get('Period', row.get('Date', f"Week {idx+1}"))
-                # Use a reasonable default FTE (could be from previous calculation)
-                if 'last_fte_calculation' in st.session_state:
-                    base_fte = st.session_state.last_fte_calculation.get(idx, 100)
-                else:
-                    base_fte = 100 + (idx * 5)  # Simple increasing pattern
-                sample_fte.append(f"{period}\t{base_fte}")
+            for i, (date, fte) in enumerate(zip(sample_dates, sample_fte_values)):
+                sample_fte.append(f"{date}\t{fte}")
 
             sample_text = "\n".join(sample_fte)
             st.text_area(
@@ -106,7 +102,7 @@ def show_service_level_prediction():
                 if len(parts) == 2:
                     fte_data.append({
                         'Period': parts[0].strip(),
-                        'FTE': int(parts[1].strip())
+                        'FTE': float(parts[1].strip())
                     })
 
         elif input_method == "Copy/Paste":
@@ -165,7 +161,7 @@ def show_service_level_prediction():
                                     period = parts[0].strip()
                                     # Handle FTE values that might have commas (e.g., "1,234")
                                     fte_str = parts[1].strip().replace(',', '')
-                                    fte_value = int(float(fte_str))
+                                    fte_value = float(fte_str)
                                     fte_data.append({
                                         'Period': period,
                                         'FTE': fte_value
@@ -217,7 +213,7 @@ def show_service_level_prediction():
                         for _, row in df.iterrows():
                             fte_data.append({
                                 'Period': str(row[period_col]),
-                                'FTE': int(row[fte_col])
+                                'FTE': float(row[fte_col])
                             })
                         st.success(f"✓ Loaded {len(fte_data)} periods from {uploaded_file.name}")
                     else:
@@ -284,6 +280,7 @@ def show_service_level_prediction():
 
             # Predict service level from occupancy
             predicted_sl = None
+            predicted_abandon = None
 
             if occupancy_to_sl_relationship:
                 # Use direct Occ→SL relationship
@@ -325,18 +322,86 @@ def show_service_level_prediction():
 
                 predicted_sl = min(100, max(0, predicted_sl))
 
+            # Predict abandon rate from service level using trained models
+            if predicted_sl is not None and fitted_models:
+                # Look for SL→Abandon relationship in fitted models
+                sl_to_abandon_relationship = None
+                for rel_name, model in fitted_models.items():
+                    if model.get('x_metric') == 'service_level' and model.get('y_metric') == 'abandonment_rate':
+                        sl_to_abandon_relationship = model
+                        break
+
+                if sl_to_abandon_relationship:
+                    # Use trained model
+                    model_type = sl_to_abandon_relationship.get('model_type')
+                    popt = sl_to_abandon_relationship.get('parameters')
+                    sl_decimal = predicted_sl / 100
+
+                    try:
+                        if model_type == 'linear' and len(popt) >= 2:
+                            predicted_abandon = popt[0] * sl_decimal + popt[1]
+                        elif model_type == 'polynomial' and len(popt) >= 3:
+                            predicted_abandon = popt[0] * sl_decimal**2 + popt[1] * sl_decimal + popt[2]
+                        elif model_type == 'exponential' and len(popt) >= 3:
+                            predicted_abandon = popt[0] * np.exp(popt[1] * sl_decimal) + popt[2]
+                        elif model_type == 'power' and len(popt) >= 3:
+                            def power_func(x, a, b, c):
+                                return a * np.power(np.abs(x + 0.001), b) + c
+                            predicted_abandon = power_func(sl_decimal, *popt)
+                        elif model_type == 'logarithmic' and len(popt) >= 2:
+                            predicted_abandon = popt[0] * np.log(sl_decimal + 0.001) + popt[1]
+
+                        # Convert to percentage and bound to realistic values
+                        if predicted_abandon is not None:
+                            predicted_abandon = predicted_abandon * 100
+                            predicted_abandon = min(50, max(0, predicted_abandon))
+                    except Exception as e:
+                        st.warning(f"Error applying abandon rate model for {period_label}: {str(e)}")
+                        predicted_abandon = None
+                else:
+                    st.warning("No Service Level → Abandonment relationship found in trained models. Please ensure this relationship is trained in the Historical Analysis section.")
+                    predicted_abandon = None
+
             results.append({
                 'Period': period_label,
                 'Actual FTE': actual_fte,
                 'Call Volume': f"{calls:,}",
                 'AHT (sec)': f"{aht:.0f}",
                 'Occupancy %': f"{occupancy:.1f}",
-                'Predicted SL %': f"{predicted_sl:.1f}" if predicted_sl is not None else "N/A"
+                'Predicted SL %': f"{predicted_sl:.1f}" if predicted_sl is not None else "N/A",
+                'Abandon %': f"{predicted_abandon:.1f}" if predicted_abandon is not None else "N/A"
             })
 
         # Display results table
         results_df = pd.DataFrame(results)
         st.dataframe(results_df, use_container_width=True, hide_index=True)
+
+        # Process models for convergence analysis - preserve existing x_metric and y_metric fields
+        processed_models = {}
+        for model_name, model_data in fitted_models.items():
+            # The models should already have the correct x_metric and y_metric fields from main.py
+            # Just pass them through without modification
+            if isinstance(model_data, dict):
+                processed_model = dict(model_data)
+                processed_model['original_name'] = model_name
+                processed_models[model_name] = processed_model
+            else:
+                processed_models[model_name] = model_data
+
+        # Store results in session state for convergence analysis
+        st.session_state['sl_prediction_results'] = {
+            'results_df': results_df,
+            'results_data': results,
+            'forecast_data': forecast_df,
+            'fte_data': fte_data,
+            'parameters': {
+                'shrinkage_rate': shrinkage_rate,
+                'hours_per_day': hours_per_day,
+                'days_per_week': days_per_week,
+                'hours_per_period': hours_per_period
+            },
+            'models': processed_models
+        }
 
         # Create visualization
         if any(r['Predicted SL %'] != "N/A" for r in results):
@@ -427,3 +492,18 @@ def show_service_level_prediction():
             st.warning("🔥 **High Occupancy**: Staff utilization is very high, which may lead to burnout.")
         elif avg_occ < 60:
             st.info("💼 **Low Occupancy**: There may be excess capacity. Consider cross-training or additional tasks.")
+
+        # Guide to convergence analysis
+        st.markdown("---")
+        st.subheader("🔄 Next Step: Convergence Analysis")
+        st.info("""
+        **Ready for Advanced Analysis?**
+
+        These predictions use basic occupancy-to-service-level relationships. For more accurate predictions
+        that account for feedback loops (abandon/retry cycles and occupancy stress effects), proceed to
+        the **🔄 Convergence Analysis** section.
+
+        Your current results have been saved and will be used as the starting point for convergence analysis.
+        """)
+
+        st.markdown("Navigate to the **🔄 Convergence Analysis** section in the sidebar to continue with advanced analysis.")
